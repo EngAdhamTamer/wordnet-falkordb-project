@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   falkordb:
     image: falkordb/falkordb:latest
@@ -37,9 +35,14 @@ services:
     environment:
       - FALKORDB_HOST=falkordb
       - FALKORDB_PORT=6379
-    # Run the loader automatically (remove if you want manual control)
+      # Choose loading mode:
+      # 'sample' = load 1000 triples for testing (fast)
+      # 'full' = load complete dataset (~1.5 hours)
+      # 'skip' = don't load automatically, keep container running
+      # 'json_compare' = run JSON comparison
+      - WORDNET_MODE=sample
     command: python main.py
-    restart: on-failure
+    restart: "no"  # Don't restart on failure
 
 volumes:
   falkordb_data:
