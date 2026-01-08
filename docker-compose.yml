@@ -1,14 +1,16 @@
+version: '3.8'
+
 services:
   falkordb:
-    image: falkordb/falkordb:latest
-    container_name: falkordb
+    image: falkordb/falkordb:edge
+    container_name: falkordb-wordnet
     ports:
       - "6379:6379"
       - "3000:3000"  # FalkorDB Studio web UI
     volumes:
-      - falkordb_data:/data
+      - falkordb_data:/var/lib/falkordb/data
     environment:
-      - REDIS_ARGS=--maxmemory 4gb --maxmemory-policy allkeys-lru
+      - REDIS_ARGS=--maxmemory 6gb --save ""
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -18,31 +20,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6G
-          cpus: '2.0'
-        reservations:
-          memory: 4G
-          cpus: '1.0'
-
-  wordnet-loader:
-    build: .
-    container_name: wordnet-loader
-    depends_on:
-      falkordb:
-        condition: service_healthy
-    volumes:
-      - ./data:/app/data
-    environment:
-      - FALKORDB_HOST=falkordb
-      - FALKORDB_PORT=6379
-      # Choose loading mode:
-      # 'sample' = load 1000 triples for testing (fast)
-      # 'full' = load complete dataset (~1.5 hours)
-      # 'skip' = don't load automatically, keep container running
-      # 'json_compare' = run JSON comparison
-      - WORDNET_MODE=sample
-    command: python main.py
-    restart: "no"  # Don't restart on failure
+          memory: 8G
+          cpus: '4.0'
 
 volumes:
   falkordb_data:
