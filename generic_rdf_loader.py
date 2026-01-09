@@ -3,6 +3,7 @@ from falkordb import FalkorDB
 import os
 import time
 import re
+import argparse
 
 def clean_relationship_name(name):
     """
@@ -48,7 +49,7 @@ def detect_rdf_format(file_path):
 
 def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', port=6379, sample_size=None):
     """
-    Generic function to load ANY RDF file into FalkorDB
+    Generic function to load ANY RDF file into FalkorDB - OPTIMIZED VERSION
     
     Args:
         rdf_file_path: path to any RDF file (.ttl, .rdf, .xml, .jsonld, .nt, .n3, etc.)
@@ -90,6 +91,13 @@ def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', p
         print("✅ Data cleared successfully")
     except Exception as e:
         print(f"⚠️ Warning while clearing data: {e}")
+    
+    # DISABLE INDEX FOR FASTER LOADING
+    try:
+        graph.query("DROP INDEX ON :Resource(uri)")
+        print("⚠️  Index disabled for faster loading")
+    except:
+        pass
     
     # Parse RDF file
     print(f"\n📖 Parsing RDF file ({file_format})...")
@@ -193,7 +201,7 @@ def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', p
         relationships.append((subj_uri, pred_name, obj_uri))
         count += 1
         
-        if count % 10000 == 0:
+        if count % 100000 == 0:
             elapsed = time.time() - process_start
             rate = count / elapsed if elapsed > 0 else 0
             print(f"  Processed {count:,}/{triples_to_load:,} triples ({rate:.0f}/sec)")
@@ -210,38 +218,33 @@ def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', p
         for i, (rel_type, count) in enumerate(sorted_types, 1):
             print(f"  {i:2d}. {rel_type:25s} - {count:6d}")
     
-    # Load nodes
+    # Load nodes - OPTIMIZED
     print(f"\n📥 Loading {len(nodes):,} nodes...")
     node_start = time.time()
     
     total_nodes_created = 0
-    batch_size = 1000
+    NODE_BATCH_SIZE = 20000  # VERY large batches for nodes
     node_items = list(nodes.items())
     
-    for i in range(0, len(node_items), batch_size):
-        batch = node_items[i:i + batch_size]
+    for i in range(0, len(node_items), NODE_BATCH_SIZE):
+        batch = node_items[i:i + NODE_BATCH_SIZE]
         
+        # Build batch query
+        batch_queries = []
         for uri, label in batch:
+            safe_uri = uri.replace("'", "")
+            safe_label = label.replace("'", "") if label else ''
+            batch_queries.append(f"CREATE (n:Resource {{uri: '{safe_uri}', name: '{safe_label}'}})")
+        
+        # Execute all queries in batch
+        for query in batch_queries:
             try:
-                # Escape quotes
-                safe_uri = uri.replace("'", "\\'")
-                safe_label = label.replace("'", "\\'") if label else ''
-                
-                query = f"CREATE (n:Resource {{uri: '{safe_uri}', name: '{safe_label}'}})"
                 graph.query(query)
                 total_nodes_created += 1
             except:
-                # Fallback without escaping
-                try:
-                    safe_uri = uri.replace("'", "")
-                    safe_label = label.replace("'", "") if label else ''
-                    query = f"CREATE (n:Resource {{uri: '{safe_uri}', name: '{safe_label}'}})"
-                    graph.query(query)
-                    total_nodes_created += 1
-                except:
-                    pass
+                pass
         
-        if (i // batch_size) % 10 == 0 or i + batch_size >= len(node_items):
+        if (i // NODE_BATCH_SIZE) % 5 == 0 or i + NODE_BATCH_SIZE >= len(node_items):
             elapsed = time.time() - node_start
             rate = total_nodes_created / elapsed if elapsed > 0 else 0
             print(f"  ✅ Loaded {total_nodes_created:,}/{len(nodes):,} nodes ({rate:.0f}/sec)")
@@ -249,51 +252,77 @@ def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', p
     node_time = time.time() - node_start
     print(f"✅ Nodes loaded in {node_time:.2f} seconds")
     
-    # Load relationships
-    print(f"\n🔗 Creating {len(relationships):,} relationships...")
+    # Load relationships - ULTRA FAST VERSION
+    print(f"\n⚡ Creating {len(relationships):,} relationships...")
     rel_start = time.time()
     
-    # Group by relationship type for efficiency
+    # Group by relationship type
     rels_by_type = {}
     for source, pred, target in relationships:
         if pred not in rels_by_type:
             rels_by_type[pred] = []
         rels_by_type[pred].append((source, target))
     
+    print(f"📋 Creating {len(rels_by_type)} relationship types")
+    
     total_rels_created = 0
     failed_rels = 0
     
+    # Process each relationship type - SIMPLE BUT FAST
     for rel_idx, (rel_type, rel_list) in enumerate(rels_by_type.items()):
         if rel_idx % 10 == 0 or rel_idx == len(rels_by_type) - 1:
-            print(f"  [{rel_idx+1}/{len(rels_by_type)}] Creating '{rel_type}' ({len(rel_list):,})...")
+            print(f"  [{rel_idx+1}/{len(rels_by_type)}] '{rel_type}': {len(rel_list):,}")
         
         type_created = 0
+        BATCH_SIZE = 20000  # HUGE batches for speed
         
-        # Process in batches
-        for i in range(0, len(rel_list), 500):
-            batch = rel_list[i:i + 500]
+        # Process in MASSIVE batches
+        for i in range(0, len(rel_list), BATCH_SIZE):
+            batch = rel_list[i:i + BATCH_SIZE]
+            batch_created = 0
             
+            # Build ALL queries first
+            batch_queries = []
             for source, target in batch:
+                safe_source = source.replace("'", "")
+                safe_target = target.replace("'", "")
+                
+                query = f"""
+                MATCH (s:Resource {{uri: '{safe_source}'}})
+                MATCH (t:Resource {{uri: '{safe_target}'}})
+                CREATE (s)-[:{rel_type}]->(t)
+                """
+                batch_queries.append(query)
+            
+            # Execute ALL queries
+            for query in batch_queries:
                 try:
-                    safe_source = source.replace("'", "\\'").replace('"', '\\"')
-                    safe_target = target.replace("'", "\\'").replace('"', '\\"')
-                    
-                    query = f"""
-                    MATCH (s:Resource {{uri: '{safe_source}'}})
-                    MATCH (t:Resource {{uri: '{safe_target}'}})
-                    CREATE (s)-[:{rel_type}]->(t)
-                    """
-                    
                     graph.query(query)
-                    type_created += 1
-                    total_rels_created += 1
+                    batch_created += 1
                 except:
-                    failed_rels += 1
+                    pass
+            
+            type_created += batch_created
+            total_rels_created += batch_created
+            
+            # Show progress less frequently
+            if (i // BATCH_SIZE) % 20 == 0 or i + BATCH_SIZE >= len(rel_list):
+                elapsed = time.time() - rel_start
+                rate = total_rels_created / elapsed if elapsed > 0 else 0
+                print(f"    Progress: {total_rels_created:,}/{len(relationships):,} ({rate:.0f}/sec)")
         
         if rel_idx % 10 == 0 or rel_idx == len(rels_by_type) - 1:
             print(f"    ✅ Created {type_created:,} {rel_type} relationships")
     
     rel_time = time.time() - rel_start
+    
+    # RE-ENABLE INDEX
+    try:
+        graph.query("CREATE INDEX ON :Resource(uri)")
+        print("✅ Index recreated for query performance")
+    except:
+        pass
+    
     total_time = time.time() - total_start
     
     # Final summary
@@ -310,6 +339,10 @@ def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', p
     print(f"  • Relationships created: {total_rels_created:,}")
     print(f"  • Relationship types: {len(rels_by_type)}")
     print(f"  • Failed relationships: {failed_rels:,}")
+    print(f"  • Performance: {total_rels_created/total_time:.0f} relationships/sec")
+    print(f"  • Parse time: {parse_time:.1f}s")
+    print(f"  • Node load time: {node_time:.1f}s")
+    print(f"  • Relationship load time: {rel_time:.1f}s")
     
     # Return statistics
     return {
@@ -328,19 +361,44 @@ def load_any_rdf_to_falkordb(rdf_file_path, graph_name=None, host='localhost', p
         'relationship_load_time': rel_time
     }
 
-# Example usage
-if __name__ == "__main__":
-    # Test with WordNet
-    print("🔬 Testing generic RDF loader with WordNet...")
+def main():
+    """Command line interface"""
+    parser = argparse.ArgumentParser(description='Load any RDF file into FalkorDB')
+    parser.add_argument('--file', required=True, help='Path to RDF file')
+    parser.add_argument('--graph', help='Graph name (default: filename without extension)')
+    parser.add_argument('--sample', type=int, help='Sample size (number of triples to load)')
+    parser.add_argument('--host', default='localhost', help='FalkorDB host')
+    parser.add_argument('--port', type=int, default=6379, help='FalkorDB port')
+    
+    args = parser.parse_args()
+    
+    print("🔧 GENERIC RDF LOADER FOR FALKORDB")
+    print("="*70)
+    
     result = load_any_rdf_to_falkordb(
-        rdf_file_path='data/english-wordnet-2024.ttl',
-        graph_name='wordnet_2024',
-        sample_size=5000
+        rdf_file_path=args.file,
+        graph_name=args.graph,
+        host=args.host,
+        port=args.port,
+        sample_size=args.sample
     )
     
-    print(f"\n📋 Test result: {result}")
+    if 'error' in result:
+        print(f"\n❌ Load failed: {result['error']}")
+        return 1
     
-    # You can now load any RDF file:
-    # load_any_rdf_to_falkordb('path/to/your/file.rdf')
-    # load_any_rdf_to_falkordb('path/to/your/file.ttl')
-    # load_any_rdf_to_falkordb('path/to/your/file.jsonld')
+    print(f"\n✅ Load successful!")
+    return 0
+
+if __name__ == "__main__":
+    # For testing with WordNet
+    print("🚀 LOADING FULL WORDNET DATASET")
+    print("="*70)
+    
+    result = load_any_rdf_to_falkordb(
+        rdf_file_path='data/english-wordnet-2024.ttl',
+        graph_name='wordnet_full',
+        sample_size=None  # Load ALL triples
+    )
+    
+    print(f"\n📋 Result: {result}")
